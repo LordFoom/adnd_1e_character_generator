@@ -4,8 +4,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 
-use crate::app::{App, Phase};
-use crate::character::{Ability, Class, Race, HIGH_SCORE, MIN_HIGH_SCORES};
+use crate::app::{App, MenuChoice, Phase, MENU_ITEMS};
+use crate::character::{Ability, Class, LevelLimit, Race, HIGH_SCORE, MIN_HIGH_SCORES};
 
 const ACCENT: Color = Color::Yellow;
 const LABEL: Color = Color::Cyan;
@@ -21,6 +21,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_header(frame, header_area, app);
     match app.phase {
+        Phase::Menu => draw_menu(frame, body_area, app),
         Phase::OrderScores => draw_score_ordering(frame, body_area, app),
         Phase::ChooseRace => draw_race_selection(frame, body_area, app),
         Phase::ChooseClass => draw_class_selection(frame, body_area, app),
@@ -31,6 +32,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let step = match app.phase {
+        Phase::Menu => "Start",
         Phase::OrderScores => "Step 1 · Ability Scores",
         Phase::ChooseRace => "Step 2 · Race",
         Phase::ChooseClass => "Step 3 · Class",
@@ -46,8 +48,8 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     ]);
     let block = Block::bordered().title(top_left(step));
 
-    // On narrow terminals the stats box would squeeze the title, so drop it.
-    if area.width < 72 {
+    // No rolls exist yet on the menu, and narrow terminals cannot fit the box.
+    if app.phase == Phase::Menu || area.width < 72 {
         frame.render_widget(Paragraph::new(line).block(block), area);
         return;
     }
@@ -77,6 +79,45 @@ fn top_left(step: &str) -> Line<'static> {
         format!(" {step} "),
         Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
     ))
+}
+
+fn draw_menu(frame: &mut Frame, area: Rect, app: &App) {
+    let items: Vec<ListItem> = MENU_ITEMS
+        .iter()
+        .map(|choice| {
+            let name_style = match choice {
+                MenuChoice::Quit => Style::new().fg(Color::Gray),
+                _ => Style::new().fg(LABEL).add_modifier(Modifier::BOLD),
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<20}", choice.label()), name_style),
+                Span::styled(choice.description(), Style::new().fg(MUTED)),
+            ]))
+        })
+        .collect();
+
+    let mut block = Block::bordered().title(" What would you like to do? ");
+    if area.width >= 60 {
+        block = block.title_top(
+            Line::from(Span::styled(
+                " numbers, dice and a bit of luck ",
+                Style::new().fg(MUTED),
+            ))
+            .right_aligned(),
+        );
+    }
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_symbol("▸ ")
+        .highlight_style(
+            Style::new()
+                .bg(Color::Rgb(40, 44, 52))
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let mut state = ListState::default().with_selected(Some(app.menu_cursor));
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_score_ordering(frame: &mut Frame, area: Rect, app: &App) {
@@ -287,10 +328,11 @@ fn draw_class_selection(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled("✘", Style::new().fg(Color::Red))
             });
 
-            // Racial level cap, e.g. "max 9" or "unlimited" for humans.
-            if let Some(limit) = app.level_limit(*class) {
+            // Racial level cap, e.g. "max 9". Humans are unlimited, which is
+            // the default, so they get no extra noise here.
+            if let Some(LevelLimit::Max(level)) = app.level_limit(*class) {
                 spans.push(Span::styled(
-                    format!("  {}", limit.label()),
+                    format!("  max {level}"),
                     Style::new().fg(MUTED),
                 ));
             }
@@ -331,7 +373,16 @@ fn draw_class_selection(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_review(frame: &mut Frame, area: Rect, app: &App) {
     if area.width < 76 {
-        let mut lines = vec![character_line(app), race_line(app), level_limit_line(app)];
+        let mut lines = vec![
+            character_line(app),
+            race_line(app),
+            level_limit_line(app),
+            physical_line(app, "  Sex          ", |p| p.sex.label().to_string()),
+            physical_line(app, "  Age          ", |p| p.age_label()),
+            physical_line(app, "  Height       ", |p| p.height_label()),
+            physical_line(app, "  Weight       ", |p| format!("{} lb", p.weight_lbs)),
+            aging_line(app),
+        ];
         lines.push(Line::from(""));
         lines.extend(ability_lines(app));
         lines.push(Line::from(""));
@@ -344,23 +395,16 @@ fn draw_review(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let [left, right] =
-        Layout::horizontal([Constraint::Length(34), Constraint::Fill(1)]).areas(area);
+        Layout::horizontal([Constraint::Length(38), Constraint::Fill(1)]).areas(area);
 
     let mut sheet = vec![
         character_line(app),
         race_line(app),
         level_limit_line(app),
-        Line::from(vec![
-            Span::styled("  Rolled sets  ", Style::new().fg(MUTED)),
-            Span::styled(app.attempts.to_string(), Style::new().fg(Color::Gray)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Total        ", Style::new().fg(MUTED)),
-            Span::styled(
-                format!("{}/108", app.final_total()),
-                Style::new().fg(Color::Gray),
-            ),
-        ]),
+        physical_line(app, "  Sex          ", |p| p.sex.label().to_string()),
+        physical_line(app, "  Age          ", |p| p.age_label()),
+        physical_line(app, "  Height       ", |p| p.height_label()),
+        physical_line(app, "  Weight       ", |p| format!("{} lb", p.weight_lbs)),
         Line::from(""),
     ];
     if let Some(class) = app.class {
@@ -392,7 +436,8 @@ fn draw_review(frame: &mut Frame, area: Rect, app: &App) {
                         Style::new().fg(Color::Green),
                     ))
                     .right_aligned(),
-                ),
+                )
+                .title_bottom(aging_line(app)),
         ),
         right,
     );
@@ -406,6 +451,36 @@ fn character_line(app: &App) -> Line<'static> {
             class.to_string(),
             Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
+    ])
+}
+
+fn physical_line(app: &App, label: &'static str, value: fn(&crate::character::Physical) -> String) -> Line<'static> {
+    let text = match &app.physical {
+        Some(physical) => value(physical),
+        None => "—".to_string(),
+    };
+    Line::from(vec![
+        Span::styled(label, Style::new().fg(MUTED)),
+        Span::styled(text, Style::new().fg(Color::Gray)),
+    ])
+}
+
+fn aging_line(app: &App) -> Line<'static> {
+    let (text, color) = match (&app.physical, app.race) {
+        (Some(physical), Some(race)) => {
+            let text = physical.aging_label(race);
+            if text == "none" {
+                (text, MUTED)
+            } else {
+                (text, Color::Yellow)
+            }
+        }
+        _ => ("—".to_string(), MUTED),
+    };
+    Line::from(vec![
+        Span::styled("  Aging:  ", Style::new().fg(MUTED)),
+        Span::styled(text, Style::new().fg(color)),
+        Span::raw(" "),
     ])
 }
 
@@ -483,6 +558,18 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     let desc = Style::new().fg(MUTED);
 
     let lines = match app.phase {
+        Phase::Menu => vec![
+            Line::from(vec![
+                Span::styled(" ↑/↓, k/j ", keys),
+                Span::styled("move  ", desc),
+                Span::styled(" Enter ", keys),
+                Span::styled("choose", desc),
+            ]),
+            Line::from(vec![
+                Span::styled(" q/Esc ", keys),
+                Span::styled("quit", desc),
+            ]),
+        ],
         Phase::OrderScores => vec![
             Line::from(vec![
                 Span::styled(" ↑/↓, k/j ", keys),
@@ -520,10 +607,12 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled(" Enter ", keys),
                 Span::styled("finish  ", desc),
+                Span::styled(" s ", keys),
+                Span::styled("swap sex  ", desc),
                 Span::styled(" Backspace ", keys),
                 Span::styled("change class  ", desc),
                 Span::styled(" q/Esc ", keys),
-                Span::styled("quit without saving", desc),
+                Span::styled("quit", desc),
             ]),
         ],
         Phase::ChooseClass => vec![
@@ -599,6 +688,13 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    /// App past the startup menu, with scores rolled.
+    fn started() -> App {
+        let mut app = App::new();
+        app.accept();
+        app
+    }
+
     fn render_text(app: &App, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -614,8 +710,38 @@ mod tests {
     }
 
     #[test]
-    fn renders_all_six_abilities_and_help() {
+    fn menu_lists_every_option() {
+        let app = App::new();
+        assert_eq!(app.phase, Phase::Menu);
+        let text = render_text(&app, 80, 20);
+        assert!(text.contains("Step through"), "missing step-through option:\n{text}");
+        assert!(text.contains("Random character"), "missing random option");
+        assert!(text.contains("Quit"), "missing quit option");
+        assert!(text.contains("What would you like to do?"), "missing menu prompt");
+    }
+
+    #[test]
+    fn menu_renders_on_small_terminals() {
+        let app = App::new();
+        for (w, h) in [(20, 8), (40, 12), (200, 50)] {
+            render_text(&app, w, h);
+        }
+    }
+
+    #[test]
+    fn random_character_review_is_rendered() {
         let mut app = App::new();
+        app.random_character();
+        assert_eq!(app.phase, Phase::Review);
+        let text = render_text(&app, 100, 24);
+        assert!(text.contains("Step 4 · Review"), "missing review title");
+        assert!(text.contains("Class"), "missing class row");
+        assert!(text.contains("Level limit"), "missing level limit row");
+    }
+
+    #[test]
+    fn renders_all_six_abilities_and_help() {
+        let mut app = started();
         app.scores = [16, 15, 14, 13, 12, 16];
         let text = render_text(&app, 80, 24);
 
@@ -635,14 +761,14 @@ mod tests {
 
     #[test]
     fn renders_in_a_small_terminal_without_panicking() {
-        let app = App::new();
+        let app = started();
         render_text(&app, 20, 10);
         render_text(&app, 200, 60);
     }
 
     #[test]
     fn highlight_follows_cursor() {
-        let mut app = App::new();
+        let mut app = started();
         app.scores = [10, 11, 12, 13, 14, 15];
         app.cursor = 3;
         let text = render_text(&app, 80, 24);
@@ -651,7 +777,7 @@ mod tests {
 
     /// Walk the app to the class step with a human of the given scores.
     fn class_step(scores: [u8; 6]) -> App {
-        let mut app = App::new();
+        let mut app = started();
         app.scores = scores;
         app.accept(); // -> races
         app.race_cursor = Race::ALL.iter().position(|r| *r == Race::Human).unwrap();
@@ -691,7 +817,7 @@ mod tests {
 
     #[test]
     fn race_step_shows_adjustments_and_open_classes() {
-        let mut app = App::new();
+        let mut app = started();
         app.scores = [16, 12, 13, 15, 9, 16];
         app.accept();
         assert_eq!(app.phase, Phase::ChooseRace);
@@ -707,7 +833,7 @@ mod tests {
 
     #[test]
     fn race_step_preview_shows_the_adjusted_scores() {
-        let mut app = App::new();
+        let mut app = started();
         app.scores = [16, 12, 13, 15, 9, 16];
         app.accept();
         app.race_cursor = Race::ALL.iter().position(|r| *r == Race::Dwarf).unwrap();
@@ -741,7 +867,7 @@ mod tests {
 
     #[test]
     fn class_list_shows_racial_level_limits() {
-        let mut app = App::new();
+        let mut app = started();
         app.scores = [16, 12, 13, 15, 9, 16];
         app.accept();
         app.race_cursor = Race::ALL.iter().position(|r| *r == Race::Dwarf).unwrap();
@@ -755,15 +881,27 @@ mod tests {
     }
 
     #[test]
-    fn human_class_list_says_unlimited() {
-        let app = class_step([16, 12, 13, 15, 9, 16]);
+    fn human_class_list_has_no_cap_annotations() {
+        let app = class_step([16, 12, 15, 15, 12, 16]);
         let text = render_text(&app, 104, 24);
-        assert!(text.contains("unlimited"), "missing unlimited limit");
+        assert!(!text.contains("max "), "humans should not show a cap:\n{text}");
+        assert!(!text.contains("unlimited"), "humans should not show a cap");
+    }
+
+    #[test]
+    fn human_review_says_unlimited() {
+        let mut app = class_step([16, 12, 15, 15, 12, 16]);
+        app.class_cursor = Class::ALL.iter().position(|c| *c == Class::Monk).unwrap();
+        app.accept();
+        assert_eq!(app.phase, Phase::Review);
+        let text = render_text(&app, 104, 24);
+        assert!(text.contains("Level limit"), "missing limit row");
+        assert!(text.contains("unlimited"), "missing unlimited value");
     }
 
     #[test]
     fn review_shows_the_level_limit() {
-        let mut app = App::new();
+        let mut app = started();
         app.scores = [16, 12, 13, 15, 9, 16];
         app.accept();
         app.race_cursor = Race::ALL.iter().position(|r| *r == Race::Dwarf).unwrap();
